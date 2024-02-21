@@ -2,13 +2,13 @@ specVersion: 1.0.0
 indexerHints:
   prune: auto
 schema:
-  file: ./schema.graphql
+  file: schema.graphql
 dataSources:
   - kind: near
     name: game.hot.tg
     network: near-mainnet
     source:
-      account: "game.hot.tg"
+      account: game.hot.tg
       startBlock: 111735080
     mapping:
       apiVersion: 0.0.6
@@ -18,4 +18,4 @@ dataSources:
         - User
       receiptHandlers:
         - handler: handleReceipt
-      file: ./src/game-hot-tg.ts
+      file: game.hot.tg/game.hot.tg.wasm

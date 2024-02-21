@@ -1,34 +1,116 @@
-import { near, BigInt } from "@graphprotocol/graph-ts"
-import { ExampleEntity } from "../generated/schema"
+import {
+  near,
+  json,
+  TypedMap,
+  BigInt,
+  log,
+  JSONValue,
+  Bytes,
+} from '@graphprotocol/graph-ts';
+import { BuyEvent, ClaimEvent, User } from "../generated/schema"
 
-export function handleReceipt(
-  receiptWithOutcome: near.ReceiptWithOutcome
-): void {
-  // Entities can be loaded from the store using a string ID; this ID
-  // needs to be unique across all entities of the same type
-  let entity = ExampleEntity.load(receiptWithOutcome.receipt.id.toHex())
+export function handleReceipt(receipt: near.ReceiptWithOutcome): void {
+  const actions = receipt.receipt.actions;
 
-  // Entities only exist after they have been saved to the store;
-  // `null` checks allow to create entities on demand
-  if (!entity) {
-    entity = new ExampleEntity(receiptWithOutcome.receipt.id.toHex())
-
-    // Entity fields can be set using simple assignments
-    entity.count = BigInt.fromI32(0)
+  for (let i = 0; i < actions.length; i++) {
+    handleAction(
+      actions[i],
+      receipt,
+    );
   }
+}
 
-  // BigInt and BigDecimal math are supported
-  entity.count = entity.count + BigInt.fromI32(1)
+export function handleAction(
+  action: near.ActionValue,
+  receipt: near.ReceiptWithOutcome,
+): void {
+  if (action.kind != near.ActionKind.FUNCTION_CALL) {
+    return;
+  }
+  const outcome = receipt.outcome;
+  const methodName = action.toFunctionCall().methodName;
+  const args = action.toFunctionCall().args;
 
-  // Entity fields can be set based on receipt information
-  entity.block = receiptWithOutcome.block.header.hash
+  for (let logIndex = 0; logIndex < outcome.logs.length; logIndex++) {
+    let outcomeLog = outcome.logs[logIndex].toString();
+    if (outcomeLog.startsWith('EVENT_JSON:')) {
+      outcomeLog = outcomeLog.replace('EVENT_JSON:', '');
+      const jsonData = json.try_fromString(outcomeLog);
+      const jsonObject = jsonData.value.toObject();
+      const event = jsonObject.get('event')!;
+      const dataArr = jsonObject.get('data')!.toArray();
+      const dataObj: TypedMap<string, JSONValue> = dataArr[0].toObject();
+      log.debug('event: {} ', [event.toString()]);
+      
+      if (event.toString() == 'ft_mint') handleClaim(dataObj, receipt);
+      if (methodName == 'buy_asset') handleTransfer(dataObj, receipt, args);
+      // if (methodName == 'join_village') handleTransfer(dataObj, receipt, args);
+    }
+  }
+}
 
-  // Entities can be written to the store with `.save()`
-  entity.save()
+export function handleClaim(
+  data: TypedMap<string, JSONValue>,
+  receipt: near.ReceiptWithOutcome,
+): void {
+  const receiptHash = receipt.receipt.id.toBase58();
+  const user_address = data.get('owner_id')!.toString();
+  const amount = BigInt.fromString(data.get('amount')!.toString());
+  const timestamp = receipt.block.header.timestampNanosec;
 
-  // Note: If a handler doesn't require existing field values, it is faster
-  // _not_ to load the entity from the store. Instead, create it fresh with
-  // `new Entity(...)`, set the fields that should be updated and save the
-  // entity back to the store. Fields that were not set or unset remain
-  // unchanged, allowing for partial updates to be applied.
+  let claimEvent = new ClaimEvent(receiptHash);
+  const user = getUser(user_address);
+  user.claimed = amount.plus(user.claimed);
+
+  claimEvent.user = user.id;
+  claimEvent.amount = amount;
+  claimEvent.timestamp = BigInt.fromU64(timestamp);
+  claimEvent.save();
+
+  user.claimEvents = user.claimEvents.concat([claimEvent.id]);
+  user.save();
+}
+
+
+export function handleTransfer(
+  data: TypedMap<string, JSONValue>,
+  receipt: near.ReceiptWithOutcome,
+  args: Bytes,
+): void {
+  const receiptHash = receipt.receipt.id.toBase58();
+  const user_address = data.get('old_owner_id')!.toString();
+  const new_owner_address = data.get('new_owner_id')!.toString();
+  const amount = data.get('amount')!.toString();
+
+  const timestamp = receipt.block.header.timestampNanosec;
+  const jsonData = json.try_fromBytes(args);
+  const jsonObject = jsonData.value.toObject();
+  const assetId = jsonObject.get('asset_id')!;
+
+  log.error('event assetId:{} {}', [args.toString(), receiptHash]);
+
+  let buyEvent = new BuyEvent(receiptHash);
+  const user = getUser(user_address);
+  buyEvent.asset_id = assetId.toBigInt();
+  buyEvent.amount = BigInt.fromString(amount);
+  buyEvent.old_owner_id = user_address;
+  buyEvent.new_owner_id = new_owner_address;
+  buyEvent.timestamp = BigInt.fromU64(timestamp);
+
+  user.buyEvents = user.buyEvents.concat([buyEvent.id]);
+
+  buyEvent.save();
+  user.save();
+}
+
+export function getUser(user_address: string): User {
+  let user = User.load(user_address);
+  if (!user) {
+    user = new User(user_address);
+    user.claimed = BigInt.zero();
+    user.claimEvents = [];
+    user.buyEvents = [];
+    user.save();
+  }
+  return user;
 }
